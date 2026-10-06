@@ -1347,7 +1347,7 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         dynamicFgMaxFrames = (std::max) (newOptions.numFramesToGenerate, 1u);
 
         if (dynamicFgFrames.has_value())
-            newOptions.numFramesToGenerate = std::clamp(dynamicFgFrames.value(), 1u, dynamicFgMaxFrames);
+            newOptions.numFramesToGenerate = std::clamp(dynamicFgFrames.value(), 1u, dynamicFgLimit);
     }
 
     return o_slDLSSGSetOptions(viewport, newOptions);
@@ -1923,6 +1923,67 @@ void StreamlineHooks::updateDlssgOptions()
     }
 }
 
+// Frame generation multiplier for Drop mode. Shown frames can only come from the generated grid
+// (base fps x multiplier), when the target divides it evenly the cadence is perfect, otherwise frames are
+// off by up to half a slot. Picks the smallest expected error, the cheaper multiplier on a tie
+uint32_t StreamlineHooks::ChooseMultiplier(double baseFps, double targetFps, uint32_t maxGenerated, double maxRefresh,
+                                           uint32_t current)
+{
+    uint32_t maxMultiplier = maxGenerated + 1;
+    if (maxRefresh > 0.0)
+        maxMultiplier = std::clamp((uint32_t) (maxRefresh / baseFps), 2u, maxMultiplier);
+
+    auto score = [&](uint32_t multiplier)
+    {
+        auto ratio = baseFps * multiplier / targetFps; // generated frames per shown frame
+        if (ratio < 1.0)
+            return 1000.0 - multiplier; // Can't reach the target, the more the better
+
+        auto frac = ratio - std::floor(ratio);
+        return (1000.0 / (baseFps * multiplier)) * (std::min) (frac, 1.0 - frac);
+    };
+
+    uint32_t best = 2;
+    for (uint32_t m = 3; m <= maxMultiplier; m++)
+    {
+        if (score(m) < score(best) - 0.05)
+            best = m;
+    }
+
+    // Keep the current one unless the new one is clearly better or as good and cheaper,
+    // every change is a DLSSG options change
+    if (current >= 2 && current <= maxMultiplier && score(current) <= score(best) + 0.3 &&
+        !(best < current && score(best) <= score(current) + 0.05))
+    {
+        return current;
+    }
+
+    LOG_DEBUG("Dynamic FG multiplier {} -> {}, base fps: {:.1f}, target: {}, max: {}", current, best, baseFps,
+              targetFps, maxMultiplier);
+    return best;
+}
+
+// Max refresh for Drop mode, from config or the primary display
+double StreamlineHooks::DynamicMaxRefresh()
+{
+    if (auto configured = Config::Instance()->FGDynamicMaxRefresh.value_or_default(); configured > 0.0f)
+        return configured;
+
+    static double refresh = 0.0;
+    static double lastQueryMs = 0.0;
+    if (auto now = Util::MillisecondsNow(); now - lastQueryMs > 5000.0)
+    {
+        DEVMODEW mode {};
+        mode.dmSize = sizeof(mode);
+        if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+            refresh = mode.dmDisplayFrequency;
+
+        lastQueryMs = now;
+    }
+
+    return refresh;
+}
+
 // Called on the game's present start marker, once per real frame
 void StreamlineHooks::dynamicFgPresent()
 {
@@ -1966,29 +2027,15 @@ void StreamlineHooks::dynamicFgPresent()
         return;
     }
 
-    // EXPERIMENT: OPTI_DYNFG_STRATEGY selects how the target is reached
-    //   count  - change numFramesToGenerate per real frame, can't go below 2x
-    //   hybrid - count switching from 2x, below 2x generate the game's count and drop presents (default)
-    //   drop   - always generate the game's count and drop presents
-    static const std::string strategy = []
-    {
-        char* value = nullptr;
-        size_t len = 0;
-        std::string result = "hybrid";
-        if (_dupenv_s(&value, &len, "OPTI_DYNFG_STRATEGY") == 0 && value != nullptr)
-        {
-            result = value;
-            free(value);
-        }
-        return result;
-    }();
-
-    // Hysteresis around 2x so it doesn't flip between the two every frame
-    static bool dropping = false;
+    // DynamicMode: 0 drop (any multiplier above 1x), 1 count switching (2x and up), 2 hybrid (count from 2x)
+    auto mode = config->FGDynamicMode.value_or_default();
     auto baseFps = avgRealFrameMs > 0.0 ? 1000.0 / avgRealFrameMs : 0.0;
-    if (strategy == "drop")
+
+    // Hysteresis around 2x so hybrid doesn't flip between the two every frame
+    static bool dropping = false;
+    if (mode == 0)
         dropping = true;
-    else if (strategy == "count" || baseFps <= 0.0)
+    else if (mode == 1 || baseFps <= 0.0)
         dropping = false;
     else if (targetFps < baseFps * 1.95)
         dropping = true;
@@ -1999,13 +2046,34 @@ void StreamlineHooks::dynamicFgPresent()
 
     if (dropping)
     {
+        // Drop can use more frames than the game asked for, up to what the GPU supports
+        auto maxGenerated =
+            state.dlssgMfgMax.value_or(0) > 0 ? (uint32_t) state.dlssgMfgMax.value() : dynamicFgMaxFrames;
+
+        // Choose once a second, the first time after a second so the base fps has settled
+        static uint32_t multiplier = 0;
+        static double lastChoiceMs = 0.0;
+        if (lastChoiceMs <= 0.0)
+            lastChoiceMs = nowMs;
+
+        if (baseFps > 0.0 && nowMs - lastChoiceMs > 1000.0)
+        {
+            multiplier = ChooseMultiplier(baseFps, targetFps, maxGenerated, DynamicMaxRefresh(), multiplier);
+            lastChoiceMs = nowMs;
+        }
+
+        frames = multiplier > 1 ? multiplier - 1 : maxGenerated;
+        dynamicFgLimit = maxGenerated;
+
         dynamicFG.Reset(nowMs);
         PresentDropper::SetTarget(targetFps);
-        PresentDropper::SetSlotMs(avgRealFrameMs / (dynamicFgMaxFrames + 1));
+        PresentDropper::SetSlotMs(avgRealFrameMs / (frames + 1));
+        PresentDropper::SetRealFrameMs(avgRealFrameMs);
     }
     else
     {
         PresentDropper::SetTarget(0.0);
+        dynamicFgLimit = dynamicFgMaxFrames;
 
         // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
         frames = dynamicFG.Decide(nowMs, targetFps, dynamicFgMaxFrames, 1);

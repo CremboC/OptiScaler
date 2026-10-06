@@ -555,6 +555,9 @@ class Config
     CustomOptional<bool> FGModifySCIndex { false };
     CustomOptional<float> FGHudCutoff { 0.0f };
     CustomOptional<float> FGDynamicTargetFps { 0.0f }; // 0 is off, used by FSR FG and DLSSG outputs
+    CustomOptional<int> FGDynamicMode { 0 };            // Game's DLSSG: 0 drop, 1 count switching, 2 hybrid
+    CustomOptional<float> FGDynamicMaxRefresh { 0.0f }; // Cap for base fps x multiplier, 0 is the display's rate
+    CustomOptional<bool> FGDynamicDropSkip { false };   // Skip dropped presents instead of repeating a frame
     CustomOptional<FrameTimeSource> FTInput { FrameTimeSource::Input };
     CustomOptional<bool> FGReprojectionEnabled { false }; // WIP Not saved or loaded
 

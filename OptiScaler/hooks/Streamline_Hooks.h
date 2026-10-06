@@ -144,6 +144,9 @@ class StreamlineHooks
     static void updateForceReflex();
     static void updateDlssgOptions();
     static void dynamicFgPresent();
+    static uint32_t ChooseMultiplier(double baseFps, double targetFps, uint32_t maxGenerated, double maxRefresh,
+                                     uint32_t current);
+    static double DynamicMaxRefresh();
 
     static void unhookInterposer();
     static void hookInterposer(HMODULE slInterposer);
@@ -334,7 +337,8 @@ class StreamlineHooks
     // Dynamic FG for the game's own DLSSG, decided once per real frame in dynamicFgPresent
     static inline DynamicFGController dynamicFG {};
     static inline std::optional<uint32_t> dynamicFgFrames = std::nullopt;
-    static inline uint32_t dynamicFgMaxFrames = 1;
+    static inline uint32_t dynamicFgMaxFrames = 1; // What the game asked for
+    static inline uint32_t dynamicFgLimit = 1;     // Highest count dynamic FG may set
 
     static bool hkdlssg_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON, const char** pluginJSON);
     static sl::Result hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,

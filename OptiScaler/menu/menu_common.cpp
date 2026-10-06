@@ -2222,9 +2222,7 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
                 auto dynamicLine = StrFmt("Target %.0f | Out %.1f | Base %.1f", DynamicFGStats::targetFps.load(),
                                           DynamicFGStats::outputFps.load(), DynamicFGStats::baseFps.load());
 
-                if (dynamicMode == DynamicFGStats::CountSwitching)
-                    dynamicLine += StrFmt(" | Gen %u/%u", DynamicFGStats::decision.load(),
-                                          DynamicFGStats::maxFrames.load());
+                dynamicLine += StrFmt(" | %ux", DynamicFGStats::decision.load() + 1);
 
                 const ImVec4 color(1.0f, 0.85f, 0.2f, 1.0f);
                 ImGui::TextColored(color, "Dynamic FG: %s", dynamicMode);
@@ -3586,6 +3584,41 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                 fpsTarget = 0.0f;
                 config->FGDLSSGFramerateTargetDMFG.reset();
             }
+
+            ImGui::EndDisabled();
+        }
+
+        // Dynamic FG for the game's own DLSSG
+        if (state.dlssgMfgMax.has_value() && !dlssgInputOrOutput)
+        {
+            ImGui::Spacing();
+
+            float dynamicTargetFps = config->FGDynamicTargetFps.value_or_default();
+            if (ImGui::SliderFloat("Dynamic FG Target FPS", &dynamicTargetFps, 0.0f, 360.0f, "%.0f"))
+                config->FGDynamicTargetFps = dynamicTargetFps;
+
+            ShowTooltip("Output framerate to reach with any multiplier, e.g. 1.3x or 2.5x of the base framerate\n"
+                        "0 is off");
+
+            ImGui::BeginDisabled(dynamicTargetFps <= 0.0f);
+
+            const char* dynamicModes[] = { "Drop", "Count", "Hybrid" };
+            int dynamicMode = std::clamp(config->FGDynamicMode.value_or_default(), 0, 2);
+            ImGui::PushItemWidth(95.0f * menuResScale);
+            if (ImGui::Combo("Dynamic FG Mode", &dynamicMode, dynamicModes, IM_ARRAYSIZE(dynamicModes)))
+                config->FGDynamicMode = dynamicMode;
+            ImGui::PopItemWidth();
+
+            ShowTooltip("Drop: generates at a fitting multiplier and only shows the frames needed, any target\n"
+                        "Count: changes generated frames per real frame, 2x and above only\n"
+                        "Hybrid: Count from 2x, Drop below");
+
+            float maxRefresh = config->FGDynamicMaxRefresh.value_or_default();
+            if (ImGui::SliderFloat("Dynamic FG Max Refresh", &maxRefresh, 0.0f, 1000.0f, "%.0f"))
+                config->FGDynamicMaxRefresh = maxRefresh;
+
+            ShowTooltip("Highest framerate Drop mode generates, usually the display's max refresh rate\n"
+                        "0 uses the display's current refresh rate");
 
             ImGui::EndDisabled();
         }

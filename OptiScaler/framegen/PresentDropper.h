@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Util.h>
+#include <Config.h>
 #include <framegen/DynamicFG.h>
 
 #include <atomic>
@@ -8,14 +9,13 @@
 #include <cstdlib>
 #include <string>
 
-// EXPERIMENT: decimal frame generation by dropping presents.
+// Decimal frame generation by dropping presents.
 // Frame generation runs at a fixed multiplier, this decides per present whether it reaches the screen
-// so the displayed framerate approaches a target. Used by the dynamic FG for targets below 2x.
-// Environment variables for testing:
+// so the displayed framerate approaches the dynamic FG target. A dropped frame is still presented, showing
+// the previous frame again (FrameRepeater), unless DynamicDropSkip is set.
+// Diagnostics through an environment variable:
 //   OPTI_PRESENT_LOG=1           log present rate and caller once per second
 //   OPTI_PRESENT_LOG=2           also write every decision to PresentDropper.csv (qpc,kept)
-//   OPTI_PRESENT_DROP_TARGET=N   force dropping to N fps, overrides the dynamic FG
-//   OPTI_PRESENT_DROP_METHOD=skip  skip the Present instead of repeating the previous frame
 class PresentDropper
 {
   public:
@@ -26,19 +26,17 @@ class PresentDropper
     // in a burst (vsync off, flip metering paces them on the GPU) get their intended display times
     static void SetSlotMs(double ms) { _slotMs = ms; }
 
-    static bool SkipMethod()
-    {
-        static const bool skip = EnvString("OPTI_PRESENT_DROP_METHOD") == "skip";
-        return skip;
-    }
+    // Real frame time, to tell whether frame generation is actually producing frames
+    static void SetRealFrameMs(double ms) { _realFrameMs = ms; }
+
+    static bool SkipMethod() { return Config::Instance()->FGDynamicDropSkip.value_or_default(); }
 
     // Returns true when this present should not reach the screen
     static bool ShouldDrop(void* caller)
     {
         static const double logLevel = EnvFloat("OPTI_PRESENT_LOG");
-        static const double forcedTarget = EnvFloat("OPTI_PRESENT_DROP_TARGET");
 
-        const double target = forcedTarget > 0.0 ? forcedTarget : _runtimeTarget.load();
+        const double target = _runtimeTarget.load();
         const double now = Util::MillisecondsNow();
         bool drop = false;
 
@@ -71,13 +69,17 @@ class PresentDropper
 
         _lastCallMs = now;
 
-        // Dropping during frame generation warm-up stops DLSSG generating for good, wait a bit first
-        if (target <= 0.0)
+        // Only drop while frame generation is producing frames (presents clearly faster than real frames),
+        // and not during its warm-up, dropping then stops DLSSG generating
+        const double realFrameMs = _realFrameMs.load();
+        const bool generating = realFrameMs <= 0.0 || (_avgIntervalMs > 0.0 && _avgIntervalMs < realFrameMs * 0.75);
+
+        if (target <= 0.0 || !generating)
             _activeSinceMs = 0.0;
         else if (_activeSinceMs <= 0.0)
             _activeSinceMs = now;
 
-        if (target > 0.0 && slot > 0.0 && now - _activeSinceMs > WarmupMs)
+        if (target > 0.0 && slot > 0.0 && _activeSinceMs > 0.0 && now - _activeSinceMs > WarmupMs)
         {
             // Output clock at the target rate, show a present when its display time reaches the next tick.
             // Half a slot of slack so a present close to the tick isn't pushed to the next one
@@ -169,8 +171,9 @@ class PresentDropper
 
     inline static std::atomic<double> _runtimeTarget = 0.0;
     inline static std::atomic<double> _slotMs = 0.0;
+    inline static std::atomic<double> _realFrameMs = 0.0;
     inline static double _activeSinceMs = 0.0;
-    static constexpr double WarmupMs = 2000.0;
+    static constexpr double WarmupMs = 1000.0;
     inline static double _virtualMs = 0.0;
     inline static double _lastCallMs = 0.0;
     inline static double _lastMs = 0.0;
