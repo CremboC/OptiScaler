@@ -3602,8 +3602,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
             ImGui::BeginDisabled(dynamicTargetFps <= 0.0f);
 
-            const char* dynamicModes[] = { "Drop", "Count", "Hybrid" };
-            int dynamicMode = std::clamp(config->FGDynamicMode.value_or_default(), 0, 2);
+            const char* dynamicModes[] = { "Drop", "Count", "Hybrid", "Auto" };
+            int dynamicMode = std::clamp(config->FGDynamicMode.value_or_default(), 0, 3);
             ImGui::PushItemWidth(95.0f * menuResScale);
             if (ImGui::Combo("Dynamic FG Mode", &dynamicMode, dynamicModes, IM_ARRAYSIZE(dynamicModes)))
                 config->FGDynamicMode = dynamicMode;
@@ -3611,7 +3611,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
             ShowTooltip("Drop: generates at a fitting multiplier and only shows the frames needed, any target\n"
                         "Count: changes generated frames per real frame, 2x and above only\n"
-                        "Hybrid: Count from 2x, Drop below");
+                        "Hybrid: Count from 2x, Drop below\n"
+                        "Auto: Drop or Count, whichever should be smoother");
 
             float maxRefresh = config->FGDynamicMaxRefresh.value_or_default();
             if (ImGui::SliderFloat("Dynamic FG Max Refresh", &maxRefresh, 0.0f, 1000.0f, "%.0f"))

@@ -1923,37 +1923,47 @@ void StreamlineHooks::updateDlssgOptions()
     }
 }
 
-// Frame generation multiplier for Drop mode. Shown frames can only come from the generated grid
-// (base fps x multiplier), when the target divides it evenly the cadence is perfect, otherwise frames are
-// off by up to half a slot. Picks the smallest expected error, the cheaper multiplier on a tie
-uint32_t StreamlineHooks::ChooseMultiplier(double baseFps, double targetFps, uint32_t maxGenerated, double maxRefresh,
-                                           uint32_t current)
+// Expected on-screen jitter of Drop mode at a multiplier. Shown frames can only come from the generated
+// grid (base fps x multiplier), when the target divides it evenly the cadence is perfect, otherwise frames are
+// off by up to half a slot. Factor from measurements on an RTX 5090
+double StreamlineHooks::DropJitterMs(double baseFps, double targetFps, uint32_t multiplier)
 {
-    uint32_t maxMultiplier = maxGenerated + 1;
-    if (maxRefresh > 0.0)
-        maxMultiplier = std::clamp((uint32_t) (maxRefresh / baseFps), 2u, maxMultiplier);
+    auto ratio = baseFps * multiplier / targetFps; // generated frames per shown frame
+    if (ratio < 0.97)
+        return 1000.0 - multiplier; // Can't reach the target, the more the better
 
-    auto score = [&](uint32_t multiplier)
-    {
-        auto ratio = baseFps * multiplier / targetFps; // generated frames per shown frame
-        if (ratio < 1.0)
-            return 1000.0 - multiplier; // Can't reach the target, the more the better
+    auto distance = std::abs(ratio - (std::max) (1.0, std::round(ratio)));
+    return 2.0 * (1000.0 / (baseFps * multiplier)) * distance;
+}
 
-        auto frac = ratio - std::floor(ratio);
-        return (1000.0 / (baseFps * multiplier)) * (std::min) (frac, 1.0 - frac);
-    };
+// Expected on-screen jitter of Count mode, it alternates between the two multipliers around the target
+double StreamlineHooks::CountJitterMs(double baseFps, double targetFps, uint32_t maxMultiplier)
+{
+    auto ratio = targetFps / baseFps;
+    if (ratio < 1.97 || ratio > maxMultiplier + 0.03)
+        return 1e9; // Count can't do it
 
+    auto lower = (std::max) (2.0, std::floor(ratio));
+    auto frac = ratio - std::floor(ratio);
+    return 0.5 * (1000.0 / baseFps) * (1.0 / lower - 1.0 / (lower + 1.0)) * (std::min) (frac, 1.0 - frac);
+}
+
+// Frame generation multiplier for Drop mode, the smallest expected jitter, the cheaper multiplier on a tie
+uint32_t StreamlineHooks::ChooseMultiplier(double baseFps, double targetFps, uint32_t maxMultiplier, uint32_t current)
+{
     uint32_t best = 2;
     for (uint32_t m = 3; m <= maxMultiplier; m++)
     {
-        if (score(m) < score(best) - 0.05)
+        if (DropJitterMs(baseFps, targetFps, m) < DropJitterMs(baseFps, targetFps, best) - 0.1)
             best = m;
     }
 
     // Keep the current one unless the new one is clearly better or as good and cheaper,
     // every change is a DLSSG options change
-    if (current >= 2 && current <= maxMultiplier && score(current) <= score(best) + 0.3 &&
-        !(best < current && score(best) <= score(current) + 0.05))
+    auto currentJitter = DropJitterMs(baseFps, targetFps, current);
+    auto bestJitter = DropJitterMs(baseFps, targetFps, best);
+    if (current >= 2 && current <= maxMultiplier && currentJitter <= bestJitter + 0.3 &&
+        !(best < current && bestJitter <= currentJitter + 0.1))
     {
         return current;
     }
@@ -2027,42 +2037,66 @@ void StreamlineHooks::dynamicFgPresent()
         return;
     }
 
-    // DynamicMode: 0 drop (any multiplier above 1x), 1 count switching (2x and up), 2 hybrid (count from 2x)
+    // DynamicMode: 0 Drop (any multiplier above 1x), 1 Count switching (2x and up), 2 Hybrid (Count from 2x),
+    // 3 Auto (whichever is expected to be smoother)
     auto mode = config->FGDynamicMode.value_or_default();
     auto baseFps = avgRealFrameMs > 0.0 ? 1000.0 / avgRealFrameMs : 0.0;
 
-    // Hysteresis around 2x so hybrid doesn't flip between the two every frame
+    // Drop and Auto can use more frames than the game asked for, up to what the GPU supports
+    auto maxGenerated =
+        state.dlssgMfgMax.value_or(0) > 0 ? (uint32_t) state.dlssgMfgMax.value() : dynamicFgMaxFrames;
+    auto maxMultiplier = maxGenerated + 1;
+    if (auto maxRefresh = DynamicMaxRefresh(); maxRefresh > 0.0 && baseFps > 0.0)
+        maxMultiplier = std::clamp((uint32_t) (maxRefresh / baseFps), 2u, maxMultiplier);
+
+    // Choose once a second, the first time after a second so the base fps has settled
     static bool dropping = false;
+    static uint32_t multiplier = 0;
+    static double lastChoiceMs = 0.0;
+    if (lastChoiceMs <= 0.0)
+        lastChoiceMs = nowMs;
+
+    bool choose = baseFps > 0.0 && nowMs - lastChoiceMs > 1000.0;
+    if (choose)
+    {
+        multiplier = ChooseMultiplier(baseFps, targetFps, maxMultiplier, multiplier);
+        lastChoiceMs = nowMs;
+    }
+
     if (mode == 0)
+    {
         dropping = true;
+    }
     else if (mode == 1 || baseFps <= 0.0)
+    {
         dropping = false;
-    else if (targetFps < baseFps * 1.95)
-        dropping = true;
-    else if (targetFps > baseFps * 2.05)
-        dropping = false;
+    }
+    else if (mode == 2)
+    {
+        // Hysteresis around 2x so it doesn't flip between the two every frame
+        if (targetFps < baseFps * 1.95)
+            dropping = true;
+        else if (targetFps > baseFps * 2.05)
+            dropping = false;
+    }
+    else if (choose)
+    {
+        auto dropJitter = DropJitterMs(baseFps, targetFps, multiplier);
+        auto countJitter = CountJitterMs(baseFps, targetFps, maxMultiplier);
+        auto newDropping = dropping ? dropJitter <= countJitter + 0.1 : dropJitter < countJitter - 0.1;
+
+        if (newDropping != dropping)
+            LOG_DEBUG("Dynamic FG auto: {}, drop jitter {:.2f}ms (x{}), count jitter {:.2f}ms",
+                      newDropping ? "drop" : "count", dropJitter, multiplier, countJitter);
+
+        dropping = newDropping;
+    }
 
     uint32_t frames = dynamicFgMaxFrames;
 
     if (dropping)
     {
-        // Drop can use more frames than the game asked for, up to what the GPU supports
-        auto maxGenerated =
-            state.dlssgMfgMax.value_or(0) > 0 ? (uint32_t) state.dlssgMfgMax.value() : dynamicFgMaxFrames;
-
-        // Choose once a second, the first time after a second so the base fps has settled
-        static uint32_t multiplier = 0;
-        static double lastChoiceMs = 0.0;
-        if (lastChoiceMs <= 0.0)
-            lastChoiceMs = nowMs;
-
-        if (baseFps > 0.0 && nowMs - lastChoiceMs > 1000.0)
-        {
-            multiplier = ChooseMultiplier(baseFps, targetFps, maxGenerated, DynamicMaxRefresh(), multiplier);
-            lastChoiceMs = nowMs;
-        }
-
-        frames = multiplier > 1 ? multiplier - 1 : maxGenerated;
+        frames = multiplier > 1 ? multiplier - 1 : maxMultiplier - 1;
         dynamicFgLimit = maxGenerated;
 
         dynamicFG.Reset(nowMs);
@@ -2073,10 +2107,10 @@ void StreamlineHooks::dynamicFgPresent()
     else
     {
         PresentDropper::SetTarget(0.0);
-        dynamicFgLimit = dynamicFgMaxFrames;
+        dynamicFgLimit = mode == 3 ? maxMultiplier - 1 : dynamicFgMaxFrames;
 
         // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
-        frames = dynamicFG.Decide(nowMs, targetFps, dynamicFgMaxFrames, 1);
+        frames = dynamicFG.Decide(nowMs, targetFps, dynamicFgLimit, 1);
         DynamicFGStats::mode = DynamicFGStats::CountSwitching;
         DynamicFGStats::targetFps = targetFps;
     }
