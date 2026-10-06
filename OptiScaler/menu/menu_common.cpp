@@ -3919,6 +3919,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ShowTooltip("Enables drawing of Pacing lines");
 
                 ImGui::Spacing();
+                float dynamicTargetFps = config->FGDynamicTargetFps.value_or_default();
+                if (ImGui::SliderFloat("Dynamic FG Target FPS", &dynamicTargetFps, 0.0f, 360.0f, "%.0f"))
+                    config->FGDynamicTargetFps = dynamicTargetFps;
+
+                ShowTooltip("Generates frames only as often as needed to reach this output framerate\n"
+                            "Decides per real frame, so the multiplier can be fractional (e.g. 1.5x)\n"
+                            "0 is off (always generate)");
+
+                ImGui::Spacing();
                 if (ImGui::TreeNode("FG Rectangle Settings"))
                 {
                     ImGui::PushItemWidth(95.0f * menuResScale);
