@@ -706,6 +706,7 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
 #endif
 
         MenuOverlayDx::CleanupRenderTarget(true, _handle);
+        _repeater.Release();
 
         if (State::Instance().currentSwapchain == this)
             State::Instance().currentSwapchain = nullptr;
@@ -781,6 +782,22 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDevice(REFIID riid, void** 
 }
 
 //
+// Dynamic FG present dropping, returns true when the Present should be skipped entirely
+bool WrappedIDXGISwapChain4::DropOrRepeat(void* caller)
+{
+    bool drop = PresentDropper::ShouldDrop(caller);
+
+    if (PresentDropper::SkipMethod())
+        return drop;
+
+    // Keep a copy of every shown frame while dropping is active, show it again instead of a dropped one.
+    // When it can't repeat (not D3D12, nothing saved yet) the frame is shown
+    if (drop || DynamicFGStats::mode == DynamicFGStats::PresentDropping)
+        _repeater.Prepare(_real, _device, !drop);
+
+    return false;
+}
+
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UINT Flags)
 {
     if (_real == nullptr)
@@ -794,7 +811,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        if (PresentDropper::ShouldDrop(_ReturnAddress()))
+        if (DropOrRepeat(_ReturnAddress()))
             return S_OK;
 
         result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp);
@@ -903,6 +920,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
     HRESULT result;
     DXGI_SWAP_CHAIN_DESC desc {};
     _real->GetDesc(&desc);
+    _repeater.ReleaseSaved();
 
     if (Config::Instance()->FGEnabled.value_or_default())
     {
@@ -1155,7 +1173,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
-        if (PresentDropper::ShouldDrop(_ReturnAddress()))
+        if (DropOrRepeat(_ReturnAddress()))
             return S_OK;
 
         result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp);
@@ -1285,6 +1303,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         OwnedLockGuard lock(_localMutex, 2);
     }
 #endif
+
+    // Present queue can change, start over
+    _repeater.Release();
 
     if (*ppPresentQueue != nullptr)
     {

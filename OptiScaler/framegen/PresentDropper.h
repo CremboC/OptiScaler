@@ -4,24 +4,37 @@
 #include <framegen/DynamicFG.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 
 // EXPERIMENT: decimal frame generation by dropping presents.
 // Frame generation runs at a fixed multiplier, this decides per present whether it reaches the screen
-// so the displayed framerate approaches a target.
-// Controlled by environment variables so it stays out of the config while testing:
+// so the displayed framerate approaches a target. Used by the dynamic FG for targets below 2x.
+// Environment variables for testing:
 //   OPTI_PRESENT_LOG=1           log present rate and caller once per second
-//   OPTI_PRESENT_DROP_TARGET=N   drop presents to approach N fps (0 or unset is off)
+//   OPTI_PRESENT_LOG=2           also write every decision to PresentDropper.csv (qpc,kept)
+//   OPTI_PRESENT_DROP_TARGET=N   force dropping to N fps, overrides the dynamic FG
+//   OPTI_PRESENT_DROP_METHOD=skip  skip the Present instead of repeating the previous frame
 class PresentDropper
 {
   public:
-    // Returns true when this present should be skipped
+    // Set by the dynamic FG, 0 is off
+    static void SetTarget(double fps) { _runtimeTarget = fps; }
+
+    static bool SkipMethod()
+    {
+        static const bool skip = EnvString("OPTI_PRESENT_DROP_METHOD") == "skip";
+        return skip;
+    }
+
+    // Returns true when this present should not reach the screen
     static bool ShouldDrop(void* caller)
     {
-        static const bool logEnabled = EnvFloat("OPTI_PRESENT_LOG") > 0.0;
-        static const double target = EnvFloat("OPTI_PRESENT_DROP_TARGET");
+        static const double logLevel = EnvFloat("OPTI_PRESENT_LOG");
+        static const double forcedTarget = EnvFloat("OPTI_PRESENT_DROP_TARGET");
 
+        const double target = forcedTarget > 0.0 ? forcedTarget : _runtimeTarget.load();
         const double now = Util::MillisecondsNow();
         bool drop = false;
 
@@ -33,7 +46,7 @@ class PresentDropper
             if (delta > 250.0)
             {
                 _avgIntervalMs = 0.0;
-                _acc = 0.0;
+                _nextShowMs = 0.0;
             }
             else
             {
@@ -45,12 +58,16 @@ class PresentDropper
 
         if (target > 0.0 && _avgIntervalMs > 0.0)
         {
-            // Fraction of incoming presents that should be shown, spread evenly (error diffusion)
-            const double keep = (std::min) (1.0, _avgIntervalMs * target / 1000.0);
-            _acc += keep;
+            // Output clock at the target rate, show a present when its time reaches the next tick.
+            // Half an input interval of slack so a present close to the tick isn't pushed to the next one
+            const double period = 1000.0 / target;
+            const double slack = _avgIntervalMs * 0.5;
 
-            if (_acc >= 1.0)
-                _acc -= 1.0;
+            if (_nextShowMs <= 0.0 || now - _nextShowMs > period * 2.0)
+                _nextShowMs = now;
+
+            if (now + slack >= _nextShowMs)
+                _nextShowMs += period;
             else
                 drop = true;
         }
@@ -59,10 +76,17 @@ class PresentDropper
         if (drop)
             _dropped++;
 
+        if (logLevel >= 2.0)
+            LogDecision(!drop);
+
         if (target > 0.0)
         {
             DynamicFGStats::mode = DynamicFGStats::PresentDropping;
             DynamicFGStats::targetFps = (float) target;
+        }
+        else if (DynamicFGStats::mode == DynamicFGStats::PresentDropping)
+        {
+            DynamicFGStats::mode = nullptr;
         }
 
         if (now - _windowStartMs >= 1000.0)
@@ -70,7 +94,7 @@ class PresentDropper
             // Displayed framerate over the last second, for the overlay
             DynamicFGStats::outputFps = (float) ((_presents - _dropped) * 1000.0 / (now - _windowStartMs));
 
-            if (logEnabled)
+            if (logLevel > 0.0)
             {
                 char path[MAX_PATH] {};
                 if (auto module = Util::GetCallerModule(caller); module != nullptr)
@@ -89,21 +113,43 @@ class PresentDropper
     }
 
   private:
-    static double EnvFloat(const char* name)
+    static void LogDecision(bool kept)
+    {
+        static FILE* file = nullptr;
+        if (file == nullptr && fopen_s(&file, "PresentDropper.csv", "w") == 0 && file != nullptr)
+            fprintf(file, "qpc,kept\n");
+
+        if (file != nullptr)
+        {
+            LARGE_INTEGER qpc {};
+            QueryPerformanceCounter(&qpc);
+            fprintf(file, "%lld,%d\n", qpc.QuadPart, kept ? 1 : 0);
+            fflush(file);
+        }
+    }
+
+    static std::string EnvString(const char* name)
     {
         char* value = nullptr;
         size_t len = 0;
         if (_dupenv_s(&value, &len, name) != 0 || value == nullptr)
-            return 0.0;
+            return {};
 
-        double result = std::atof(value);
+        std::string result = value;
         free(value);
         return result;
     }
 
+    static double EnvFloat(const char* name)
+    {
+        auto value = EnvString(name);
+        return value.empty() ? 0.0 : std::atof(value.c_str());
+    }
+
+    inline static std::atomic<double> _runtimeTarget = 0.0;
     inline static double _lastMs = 0.0;
     inline static double _avgIntervalMs = 0.0;
-    inline static double _acc = 0.0;
+    inline static double _nextShowMs = 0.0;
     inline static double _windowStartMs = 0.0;
     inline static uint32_t _presents = 0;
     inline static uint32_t _dropped = 0;

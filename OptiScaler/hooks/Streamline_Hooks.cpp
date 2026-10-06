@@ -10,6 +10,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/PresentDropper.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
 
@@ -1953,6 +1954,8 @@ void StreamlineHooks::dynamicFgPresent()
         if (DynamicFGStats::mode == DynamicFGStats::CountSwitching)
             DynamicFGStats::mode = nullptr;
 
+        PresentDropper::SetTarget(0.0);
+
         if (dynamicFgFrames.has_value())
         {
             dynamicFgFrames.reset();
@@ -1963,14 +1966,55 @@ void StreamlineHooks::dynamicFgPresent()
         return;
     }
 
-    // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
-    auto frames = dynamicFG.Decide(Util::MillisecondsNow(), targetFps, dynamicFgMaxFrames, 1);
+    // EXPERIMENT: OPTI_DYNFG_STRATEGY selects how the target is reached
+    //   count  - change numFramesToGenerate per real frame, can't go below 2x
+    //   hybrid - count switching from 2x, below 2x generate the game's count and drop presents (default)
+    //   drop   - always generate the game's count and drop presents
+    static const std::string strategy = []
+    {
+        char* value = nullptr;
+        size_t len = 0;
+        std::string result = "hybrid";
+        if (_dupenv_s(&value, &len, "OPTI_DYNFG_STRATEGY") == 0 && value != nullptr)
+        {
+            result = value;
+            free(value);
+        }
+        return result;
+    }();
 
-    LOG_DEBUG("Dynamic FG target: {}, avg frame time: {:.2f}ms, frames: {} -> {}", targetFps,
-              dynamicFG.AverageFrameTimeMs(), dynamicFgMaxFrames, frames);
+    // Hysteresis around 2x so it doesn't flip between the two every frame
+    static bool dropping = false;
+    auto baseFps = avgRealFrameMs > 0.0 ? 1000.0 / avgRealFrameMs : 0.0;
+    if (strategy == "drop")
+        dropping = true;
+    else if (strategy == "count" || baseFps <= 0.0)
+        dropping = false;
+    else if (targetFps < baseFps * 1.95)
+        dropping = true;
+    else if (targetFps > baseFps * 2.05)
+        dropping = false;
 
-    DynamicFGStats::mode = DynamicFGStats::CountSwitching;
-    DynamicFGStats::targetFps = targetFps;
+    uint32_t frames = dynamicFgMaxFrames;
+
+    if (dropping)
+    {
+        dynamicFG.Reset(nowMs);
+        PresentDropper::SetTarget(targetFps);
+    }
+    else
+    {
+        PresentDropper::SetTarget(0.0);
+
+        // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
+        frames = dynamicFG.Decide(nowMs, targetFps, dynamicFgMaxFrames, 1);
+        DynamicFGStats::mode = DynamicFGStats::CountSwitching;
+        DynamicFGStats::targetFps = targetFps;
+    }
+
+    LOG_DEBUG("Dynamic FG target: {}, base fps: {:.2f}, dropping: {}, frames: {} -> {}", targetFps, baseFps, dropping,
+              dynamicFgMaxFrames, frames);
+
     DynamicFGStats::decision = frames;
     DynamicFGStats::maxFrames = dynamicFgMaxFrames;
 
