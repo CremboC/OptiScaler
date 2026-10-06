@@ -12,6 +12,7 @@
 #include <menu/menu_overlay_dx.h>
 
 #include <misc/FrameLimit.h>
+#include <framegen/PresentDropper.h>
 
 #include <d3d11.h>
 #include <d3d12.h>
@@ -793,6 +794,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
+        if (PresentDropper::ShouldDrop(_ReturnAddress()))
+            return S_OK;
+
         result = LocalPresent(_real, SyncInterval, Flags, nullptr, _device, _handle, _uwp);
 
         // When Reflex can't be used to limit, sleep in present
@@ -1151,6 +1155,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present1(UINT SyncInterval, UI
 
     if ((Flags & DXGI_PRESENT_TEST) == 0)
     {
+        if (PresentDropper::ShouldDrop(_ReturnAddress()))
+            return S_OK;
+
         result = LocalPresent(_real1, SyncInterval, Flags, pPresentParameters, _device, _handle, _uwp);
 
         // When Reflex can't be used to limit, sleep in present

@@ -1340,19 +1340,13 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     state.dlssgLastSetMode = newOptions.mode;
 
-    // Dynamic FG, game asked for frame generation, generate 0..N frames for this real frame
+    // Dynamic FG, game asked for frame generation, generate 1..N frames for this real frame
     if (dlssgPotentiallyActive && newOptions.mode == sl::DLSSGMode::eOn)
     {
         dynamicFgMaxFrames = (std::max) (newOptions.numFramesToGenerate, 1u);
 
         if (dynamicFgFrames.has_value())
-        {
-            auto frames = (std::min) (dynamicFgFrames.value(), dynamicFgMaxFrames);
-
-            newOptions.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
-            newOptions.mode = frames > 0 ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
-            newOptions.numFramesToGenerate = (std::max) (frames, 1u);
-        }
+            newOptions.numFramesToGenerate = std::clamp(dynamicFgFrames.value(), 1u, dynamicFgMaxFrames);
     }
 
     return o_slDLSSGSetOptions(viewport, newOptions);
@@ -1944,8 +1938,21 @@ void StreamlineHooks::dynamicFgPresent()
     bool usable = targetFps > 0.0f && o_slDLSSGSetOptions != nullptr && !ownDlssg && !replacedDlssg &&
                   !forcedDynamic && lastDlssgOptions.mode != sl::DLSSGMode::eOff;
 
+    // Real frame rate for the overlay, also when the controller is off
+    static double lastPresentMs = 0.0;
+    static double avgRealFrameMs = 0.0;
+    auto nowMs = Util::MillisecondsNow();
+    if (auto delta = nowMs - lastPresentMs; lastPresentMs > 0.0 && delta < 250.0)
+        avgRealFrameMs = avgRealFrameMs <= 0.0 ? delta : avgRealFrameMs + 0.1 * (delta - avgRealFrameMs);
+    lastPresentMs = nowMs;
+    if (avgRealFrameMs > 0.0)
+        DynamicFGStats::baseFps = (float) (1000.0 / avgRealFrameMs);
+
     if (!usable)
     {
+        if (DynamicFGStats::mode == DynamicFGStats::CountSwitching)
+            DynamicFGStats::mode = nullptr;
+
         if (dynamicFgFrames.has_value())
         {
             dynamicFgFrames.reset();
@@ -1956,10 +1963,16 @@ void StreamlineHooks::dynamicFgPresent()
         return;
     }
 
-    auto frames = dynamicFG.Decide(Util::MillisecondsNow(), targetFps, dynamicFgMaxFrames);
+    // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
+    auto frames = dynamicFG.Decide(Util::MillisecondsNow(), targetFps, dynamicFgMaxFrames, 1);
 
     LOG_DEBUG("Dynamic FG target: {}, avg frame time: {:.2f}ms, frames: {} -> {}", targetFps,
               dynamicFG.AverageFrameTimeMs(), dynamicFgMaxFrames, frames);
+
+    DynamicFGStats::mode = DynamicFGStats::CountSwitching;
+    DynamicFGStats::targetFps = targetFps;
+    DynamicFGStats::decision = frames;
+    DynamicFGStats::maxFrames = dynamicFgMaxFrames;
 
     // Streamline keeps the options, only call it again when the decision changes
     if (dynamicFgFrames != frames)

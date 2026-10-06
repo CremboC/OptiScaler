@@ -11,6 +11,7 @@
 #include <proxies/Streamline_Proxy.h>
 
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/DynamicFG.h>
 #include <framegen/reprojection/Reprojection_Dx12.h>
 
 #include <nvapi/fakenvapi.h>
@@ -2215,6 +2216,20 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 
             // Draw the overlay
             ImGui::Text(firstLine.c_str());
+
+            if (const char* dynamicMode = DynamicFGStats::mode; dynamicMode != nullptr)
+            {
+                auto dynamicLine = StrFmt("Target %.0f | Out %.1f | Base %.1f", DynamicFGStats::targetFps.load(),
+                                          DynamicFGStats::outputFps.load(), DynamicFGStats::baseFps.load());
+
+                if (dynamicMode == DynamicFGStats::CountSwitching)
+                    dynamicLine += StrFmt(" | Gen %u/%u", DynamicFGStats::decision.load(),
+                                          DynamicFGStats::maxFrames.load());
+
+                const ImVec4 color(1.0f, 0.85f, 0.2f, 1.0f);
+                ImGui::TextColored(color, "Dynamic FG: %s", dynamicMode);
+                ImGui::TextColored(color, "%s", dynamicLine.c_str());
+            }
 
             if (config->FpsOverlayType.value_or_default() >= FpsOverlay_Detailed)
             {

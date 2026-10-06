@@ -1,7 +1,22 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+
+// What the dynamic FG is doing right now, shown on the FPS overlay
+struct DynamicFGStats
+{
+    static constexpr const char* CountSwitching = "DLSSG count switching";
+    static constexpr const char* PresentDropping = "present dropping";
+
+    inline static std::atomic<const char*> mode = nullptr; // nullptr when inactive
+    inline static std::atomic<float> targetFps = 0.0f;
+    inline static std::atomic<float> baseFps = 0.0f;   // real frames
+    inline static std::atomic<float> outputFps = 0.0f; // presents that reach the screen
+    inline static std::atomic<uint32_t> decision = 0;  // generated frames for the last real frame
+    inline static std::atomic<uint32_t> maxFrames = 0;
+};
 
 // Decides, once per real frame, how many frames to interpolate so that the
 // average output framerate approaches a target ("decimal" frame generation).
@@ -15,8 +30,9 @@ class DynamicFGController
     // nowMs:      monotonic timestamp of this real frame in milliseconds
     // targetFps:  desired output framerate, <= 0 disables the controller
     // maxFrames:  frames the backend would generate for this frame (0 = none possible)
-    // Returns the number of frames to generate, in [0, maxFrames]
-    uint32_t Decide(double nowMs, double targetFps, uint32_t maxFrames)
+    // minFrames:  lowest allowed decision, DLSSG can't be switched off per frame
+    // Returns the number of frames to generate, in [minFrames, maxFrames]
+    uint32_t Decide(double nowMs, double targetFps, uint32_t maxFrames, uint32_t minFrames = 0)
     {
         const bool firstFrame = _lastMs < 0.0;
         const double deltaMs = nowMs - _lastMs;
@@ -40,10 +56,12 @@ class DynamicFGController
         if (maxFrames == 0)
             return 0;
 
+        minFrames = (std::min) (minFrames, maxFrames);
+
         const double targetFrameTimeMs = 1000.0 / targetFps;
         const double owed = _avgFrameTimeMs / targetFrameTimeMs - 1.0;
 
-        _debt += std::clamp(owed, 0.0, static_cast<double>(maxFrames));
+        _debt += std::clamp(owed, static_cast<double>(minFrames), static_cast<double>(maxFrames));
 
         const auto frames = static_cast<uint32_t>(std::min(_debt, static_cast<double>(maxFrames)));
         _debt -= frames;
