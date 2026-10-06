@@ -22,6 +22,10 @@ class PresentDropper
     // Set by the dynamic FG, 0 is off
     static void SetTarget(double fps) { _runtimeTarget = fps; }
 
+    // Expected spacing of frame generation output (real frame time / multiplier), lets presents that arrive
+    // in a burst (vsync off, flip metering paces them on the GPU) get their intended display times
+    static void SetSlotMs(double ms) { _slotMs = ms; }
+
     static bool SkipMethod()
     {
         static const bool skip = EnvString("OPTI_PRESENT_DROP_METHOD") == "skip";
@@ -47,6 +51,7 @@ class PresentDropper
             {
                 _avgIntervalMs = 0.0;
                 _nextShowMs = 0.0;
+                _activeSinceMs = 0.0;
             }
             else
             {
@@ -56,17 +61,33 @@ class PresentDropper
 
         _lastMs = now;
 
-        if (target > 0.0 && _avgIntervalMs > 0.0)
+        // Intended display time: presents closer together than half a slot are part of a burst,
+        // they will be shown one slot apart
+        const double slot = _slotMs.load() > 0.0 ? _slotMs.load() : _avgIntervalMs;
+        if (_virtualMs > 0.0 && slot > 0.0 && now - _lastCallMs < slot * 0.5)
+            _virtualMs += slot;
+        else
+            _virtualMs = now;
+
+        _lastCallMs = now;
+
+        // Dropping during frame generation warm-up stops DLSSG generating for good, wait a bit first
+        if (target <= 0.0)
+            _activeSinceMs = 0.0;
+        else if (_activeSinceMs <= 0.0)
+            _activeSinceMs = now;
+
+        if (target > 0.0 && slot > 0.0 && now - _activeSinceMs > WarmupMs)
         {
-            // Output clock at the target rate, show a present when its time reaches the next tick.
-            // Half an input interval of slack so a present close to the tick isn't pushed to the next one
+            // Output clock at the target rate, show a present when its display time reaches the next tick.
+            // Half a slot of slack so a present close to the tick isn't pushed to the next one
             const double period = 1000.0 / target;
-            const double slack = _avgIntervalMs * 0.5;
+            const double slack = slot * 0.5;
 
-            if (_nextShowMs <= 0.0 || now - _nextShowMs > period * 2.0)
-                _nextShowMs = now;
+            if (_nextShowMs <= 0.0 || _virtualMs - _nextShowMs > period * 2.0 || _nextShowMs - _virtualMs > period * 2.0)
+                _nextShowMs = _virtualMs;
 
-            if (now + slack >= _nextShowMs)
+            if (_virtualMs + slack >= _nextShowMs)
                 _nextShowMs += period;
             else
                 drop = true;
@@ -147,6 +168,11 @@ class PresentDropper
     }
 
     inline static std::atomic<double> _runtimeTarget = 0.0;
+    inline static std::atomic<double> _slotMs = 0.0;
+    inline static double _activeSinceMs = 0.0;
+    static constexpr double WarmupMs = 2000.0;
+    inline static double _virtualMs = 0.0;
+    inline static double _lastCallMs = 0.0;
     inline static double _lastMs = 0.0;
     inline static double _avgIntervalMs = 0.0;
     inline static double _nextShowMs = 0.0;

@@ -2001,6 +2001,7 @@ void StreamlineHooks::dynamicFgPresent()
     {
         dynamicFG.Reset(nowMs);
         PresentDropper::SetTarget(targetFps);
+        PresentDropper::SetSlotMs(avgRealFrameMs / (dynamicFgMaxFrames + 1));
     }
     else
     {
