@@ -7,6 +7,8 @@
 #include "dxgi1_6.h"
 #include "d3d12.h"
 
+#include <framegen/FrameRepeater.h>
+
 using Microsoft::WRL::ComPtr;
 
 #define USE_LOCAL_MUTEX
@@ -92,6 +94,9 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     UINT _lastFlags = 0;
 
     IUnknown* _device = nullptr;
+
+    FrameRepeater _repeater;
+    bool DropOrRepeat(void* caller);
 
     HWND _handle = nullptr;
 

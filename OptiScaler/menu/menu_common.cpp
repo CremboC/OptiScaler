@@ -11,6 +11,7 @@
 #include <proxies/Streamline_Proxy.h>
 
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/DynamicFG.h>
 #include <framegen/reprojection/Reprojection_Dx12.h>
 
 #include <nvapi/fakenvapi.h>
@@ -2216,6 +2217,18 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             // Draw the overlay
             ImGui::Text(firstLine.c_str());
 
+            if (const char* dynamicMode = DynamicFGStats::mode; dynamicMode != nullptr)
+            {
+                auto dynamicLine = StrFmt("Target %.0f | Out %.1f | Base %.1f", DynamicFGStats::targetFps.load(),
+                                          DynamicFGStats::outputFps.load(), DynamicFGStats::baseFps.load());
+
+                dynamicLine += StrFmt(" | %ux", DynamicFGStats::decision.load() + 1);
+
+                const ImVec4 color(1.0f, 0.85f, 0.2f, 1.0f);
+                ImGui::TextColored(color, "Dynamic FG: %s", dynamicMode);
+                ImGui::TextColored(color, "%s", dynamicLine.c_str());
+            }
+
             if (config->FpsOverlayType.value_or_default() >= FpsOverlay_Detailed)
             {
                 if (config->FpsOverlayHorizontal.value_or_default())
@@ -3575,6 +3588,42 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
             ImGui::EndDisabled();
         }
 
+        // Dynamic FG for the game's own DLSSG
+        if (state.dlssgMfgMax.has_value() && !dlssgInputOrOutput)
+        {
+            ImGui::Spacing();
+
+            float dynamicTargetFps = config->FGDynamicTargetFps.value_or_default();
+            if (ImGui::SliderFloat("Dynamic FG Target FPS", &dynamicTargetFps, 0.0f, 360.0f, "%.0f"))
+                config->FGDynamicTargetFps = dynamicTargetFps;
+
+            ShowTooltip("Output framerate to reach with any multiplier, e.g. 1.3x or 2.5x of the base framerate\n"
+                        "0 is off");
+
+            ImGui::BeginDisabled(dynamicTargetFps <= 0.0f);
+
+            const char* dynamicModes[] = { "Drop", "Count", "Hybrid", "Auto" };
+            int dynamicMode = std::clamp(config->FGDynamicMode.value_or_default(), 0, 3);
+            ImGui::PushItemWidth(95.0f * menuResScale);
+            if (ImGui::Combo("Dynamic FG Mode", &dynamicMode, dynamicModes, IM_ARRAYSIZE(dynamicModes)))
+                config->FGDynamicMode = dynamicMode;
+            ImGui::PopItemWidth();
+
+            ShowTooltip("Drop: generates at a fitting multiplier and only shows the frames needed, any target\n"
+                        "Count: changes generated frames per real frame, 2x and above only\n"
+                        "Hybrid: Count from 2x, Drop below\n"
+                        "Auto: Drop or Count, whichever should be smoother");
+
+            float maxRefresh = config->FGDynamicMaxRefresh.value_or_default();
+            if (ImGui::SliderFloat("Dynamic FG Max Refresh", &maxRefresh, 0.0f, 1000.0f, "%.0f"))
+                config->FGDynamicMaxRefresh = maxRefresh;
+
+            ShowTooltip("Highest framerate Drop mode generates, usually the display's max refresh rate\n"
+                        "0 uses the display's current refresh rate");
+
+            ImGui::EndDisabled();
+        }
+
         auto fgOutput = reinterpret_cast<IFGFeature_Dx12*>(state.currentFG);
         if ((state.activeFgOutput != FGOutput::Reprojection && state.activeFgOutput != FGOutput::NoFG &&
              state.activeFgInput != FGInput::NoFG && state.activeFgInput != FGInput::NvngxFG) &&
@@ -3917,6 +3966,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     LOG_DEBUG("Enabled set FGDebugLines: {}", debugPacingLines);
                 }
                 ShowTooltip("Enables drawing of Pacing lines");
+
+                ImGui::Spacing();
+                float dynamicTargetFps = config->FGDynamicTargetFps.value_or_default();
+                if (ImGui::SliderFloat("Dynamic FG Target FPS", &dynamicTargetFps, 0.0f, 360.0f, "%.0f"))
+                    config->FGDynamicTargetFps = dynamicTargetFps;
+
+                ShowTooltip("Generates frames only as often as needed to reach this output framerate\n"
+                            "Decides per real frame, so the multiplier can be fractional (e.g. 1.5x)\n"
+                            "0 is off (always generate)");
 
                 ImGui::Spacing();
                 if (ImGui::TreeNode("FG Rectangle Settings"))
@@ -4342,6 +4400,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ImGui::EndDisabled();
             }
         }
+
+        ImGui::BeginDisabled(config->FGDLSSGForceDMFG.value_or_default());
+        float dynamicTargetFps = config->FGDynamicTargetFps.value_or_default();
+        if (ImGui::SliderFloat("Dynamic FG Target FPS##DLSSG", &dynamicTargetFps, 0.0f, 360.0f, "%.0f"))
+            config->FGDynamicTargetFps = dynamicTargetFps;
+
+        ShowTooltip("Decides per real frame how many frames DLSSG generates (0 turns it off for that frame)\n"
+                    "so the output framerate averages to this target, e.g. 1.5x\n"
+                    "0 is off (always generate)");
+        ImGui::EndDisabled();
 
         bool useGamesMarkers = config->FGDLSSGUseGamesReflexMarkers.value_or_default();
         ImGui::BeginDisabled(!ReflexHooks::gameIsSendingMarkers());

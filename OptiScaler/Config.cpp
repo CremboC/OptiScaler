@@ -126,6 +126,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGModifyBufferState.set_from_config(readBool("FrameGen", "ModifyBufferState"));
             FGModifySCIndex.set_from_config(readBool("FrameGen", "ModifySCIndex"));
             FGHudCutoff.set_from_config(readFloat("FrameGen", "HudCutoff"));
+            FGDynamicTargetFps.set_from_config(readFloat("FrameGen", "DynamicTargetFps"));
+            FGDynamicMode.set_from_config(readInt("FrameGen", "DynamicMode"));
+            FGDynamicMaxRefresh.set_from_config(readFloat("FrameGen", "DynamicMaxRefresh"));
+            FGDynamicDropSkip.set_from_config(readBool("FrameGen", "DynamicDropSkip"));
         }
 
         // FSR FG
@@ -924,6 +928,13 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGModifyBufferState.value_for_config()).c_str());
         ini.SetValue("FrameGen", "ModifySCIndex", GetBoolValue(Instance()->FGModifySCIndex.value_for_config()).c_str());
         ini.SetValue("FrameGen", "HudCutoff", GetFloatValue(Instance()->FGHudCutoff.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "DynamicTargetFps",
+                     GetFloatValue(Instance()->FGDynamicTargetFps.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "DynamicMode", GetIntValue(Instance()->FGDynamicMode.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "DynamicMaxRefresh",
+                     GetFloatValue(Instance()->FGDynamicMaxRefresh.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "DynamicDropSkip",
+                     GetBoolValue(Instance()->FGDynamicDropSkip.value_for_config()).c_str());
     }
 
     // FSR FG output

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <framegen/IFGFeature_Dx12.h>
+#include <framegen/DynamicFG.h>
 
 #include <proxies/Streamline_Proxy.h>
 
@@ -16,6 +17,8 @@ class DLSSG_Dx12 : public virtual IFGFeature_Dx12
 
     ID3D12Fence* dlssgFence[BUFFER_COUNT] = {};
     UINT64 lastOptionFrame = 0;
+
+    DynamicFGController _dynamicFG;
 
     bool Dispatch();
 

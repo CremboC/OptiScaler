@@ -1033,6 +1033,14 @@ ffxReturnCode_t FSRFG_Dx12::DispatchCallback(ffxDispatchDescFrameGeneration* par
         }
     }
 
+    if (auto targetFps = Config::Instance()->FGDynamicTargetFps.value_or_default(); targetFps > 0.0f)
+    {
+        auto requested = params->numGeneratedFrames;
+        params->numGeneratedFrames = _dynamicFG.Decide(Util::MillisecondsNow(), targetFps, requested);
+        LOG_DEBUG("Dynamic FG target: {}, avg frame time: {:.2f}ms, frames: {} -> {}", targetFps,
+                  _dynamicFG.AverageFrameTimeMs(), requested, params->numGeneratedFrames);
+    }
+
     auto dispatchResult = FfxApiProxy::D3D12_Dispatch(&_fgContext, &params->header);
     LOG_DEBUG("D3D12_Dispatch result: {}, fIndex: {}", (UINT) dispatchResult, fIndex);
 

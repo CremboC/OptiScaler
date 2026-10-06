@@ -10,6 +10,7 @@
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_base.h>
 #include <framegen/nvngx/Nvngx_FG.h>
+#include <framegen/PresentDropper.h>
 #include <proxies/KernelBase_Proxy.h>
 #include <imgui/ImGuiNotify.hpp>
 
@@ -1182,12 +1183,23 @@ bool StreamlineHooks::hklocal_dlssg_slOnPluginLoad(sl::param::IParameters* param
 sl::Result StreamlineHooks::hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,
                                              const sl::ViewportHandle& viewport)
 {
-    std::scoped_lock lock(setConstantsMutex);
-    LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
+    sl::Result result;
 
-    State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
+    {
+        std::scoped_lock lock(setConstantsMutex);
+        LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
 
-    return o_slSetConstants(values, frame, viewport);
+        // Always hooked for dynamic FG, only feed our FG inputs when they are used
+        if (State::Instance().activeFgInput == FGInput::NvngxFG || State::Instance().activeFgInput == FGInput::DLSSG)
+            State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
+
+        result = o_slSetConstants(values, frame, viewport);
+    }
+
+    // DLSSG games set constants every frame, a reliable once per real frame point for dynamic FG
+    dynamicFgPresent((uint32_t) frame);
+
+    return result;
 }
 
 bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON,
@@ -1339,6 +1351,24 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
     }
 
     state.dlssgLastSetMode = newOptions.mode;
+
+    // Dynamic FG, game asked for frame generation, generate 1..N frames for this real frame
+    if (dlssgPotentiallyActive && newOptions.mode == sl::DLSSGMode::eOn)
+    {
+        dynamicFgMaxFrames = (std::max) (newOptions.numFramesToGenerate, 1u);
+
+        if (dynamicFgFrames.has_value())
+        {
+            newOptions.numFramesToGenerate = std::clamp(dynamicFgFrames.value(), 1u, dynamicFgLimit);
+        }
+        else if (Config::Instance()->FGDynamicTargetFps.value_or_default() > 0.0f &&
+                 state.dlssgMfgMax.value_or(0) > 0)
+        {
+            // DLSSG can't go above the count it started with once it is generating, lowering is fine,
+            // so dynamic FG starts it at the GPU max whatever the game asked for
+            newOptions.numFramesToGenerate = (uint32_t) state.dlssgMfgMax.value();
+        }
+    }
 
     return o_slDLSSGSetOptions(viewport, newOptions);
 }
@@ -1684,9 +1714,8 @@ void* StreamlineHooks::hkreflex_slGetPluginFunction(PFN_slGetPluginFunction orig
     }
 
     // TODO: Hopefully a game doesn't call both, maybe separate
-    if (strcmp(functionName, "slReflexSetMarker") == 0 &&
-        (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
-         State::Instance().activeFgInput == FGInput::DLSSG))
+    // Always hooked, dynamic FG needs the present marker
+    if (strcmp(functionName, "slReflexSetMarker") == 0)
     {
         o_slPCLSetMarker = (decltype(&slPCLSetMarker)) original(functionName);
         return &hkslPCLSetMarker;
@@ -1729,6 +1758,9 @@ sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::Fra
             return result;
         }
     }
+
+    if (marker == sl::PCLMarker::ePresentStart)
+        dynamicFgPresent((uint32_t) frame);
 
     if (State::Instance().activeFgInput == FGInput::DLSSG)
     {
@@ -1785,9 +1817,8 @@ void* StreamlineHooks::hkpcl_slGetPluginFunction(PFN_slGetPluginFunction origina
 {
     // LOG_DEBUG("{}", functionName);
 
-    if (strcmp(functionName, "slPCLSetMarker") == 0 &&
-        (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
-         State::Instance().activeFgInput == FGInput::DLSSG))
+    // Always hooked, dynamic FG needs the present marker
+    if (strcmp(functionName, "slPCLSetMarker") == 0)
     {
         o_slPCLSetMarker = (decltype(&slPCLSetMarker)) original(functionName);
         return &hkslPCLSetMarker;
@@ -1908,6 +1939,251 @@ void StreamlineHooks::updateDlssgOptions()
     if (o_slDLSSGSetOptions)
     {
         LOG_FUNC();
+        hkslDLSSGSetOptions(lastDlssgViewport, lastDlssgOptions);
+    }
+}
+
+// Expected on-screen jitter (SD) of Drop mode at a multiplier. Shown frames can only come from the generated
+// grid (base fps x multiplier), when the target divides it evenly the cadence is perfect, otherwise frames are
+// off by up to half a slot, about a third of a slot on average. Fitted to measurements on an RTX 5090
+double StreamlineHooks::DropJitterMs(double baseFps, double targetFps, uint32_t multiplier)
+{
+    auto ratio = baseFps * multiplier / targetFps; // generated frames per shown frame
+    if (ratio < 0.97)
+        return 1000.0 - multiplier; // Can't reach the target, the more the better
+
+    auto distance = std::abs(ratio - (std::max) (1.0, std::round(ratio)));
+    return 2.0 * (1000.0 / (baseFps * multiplier)) * (std::min) (distance, 0.29);
+}
+
+// Expected on-screen jitter of Count mode, it alternates between the two multipliers around the target
+double StreamlineHooks::CountJitterMs(double baseFps, double targetFps, uint32_t maxMultiplier)
+{
+    auto ratio = targetFps / baseFps;
+    if (ratio < 1.97 || ratio > maxMultiplier + 0.03)
+        return 1e9; // Count can't do it
+
+    auto lower = (std::max) (2.0, std::floor(ratio));
+    auto frac = ratio - std::floor(ratio);
+    return (1000.0 / baseFps) * (1.0 / lower - 1.0 / (lower + 1.0)) * (std::min) (frac, 1.0 - frac);
+}
+
+// Highest multiplier Count may use, it alternates around the target so only the average output has to fit the cap
+uint32_t StreamlineHooks::CountMaxMultiplier(double baseFps, double targetFps, uint32_t maxGenerated)
+{
+    auto maxRefresh = DynamicMaxRefresh();
+    auto needed = (uint32_t) std::ceil(targetFps / baseFps - 0.03);
+    auto limit = maxGenerated + 1;
+
+    if (maxRefresh > 0.0 && targetFps > maxRefresh)
+        limit = (std::min) (limit, (std::max) (2u, (uint32_t) (maxRefresh / baseFps)));
+
+    return std::clamp(needed, 2u, limit);
+}
+
+// Frame generation multiplier for Drop mode, the smallest expected jitter, the cheaper multiplier on a tie
+uint32_t StreamlineHooks::ChooseMultiplier(double baseFps, double targetFps, uint32_t maxMultiplier, uint32_t current)
+{
+    uint32_t best = 2;
+    for (uint32_t m = 3; m <= maxMultiplier; m++)
+    {
+        if (DropJitterMs(baseFps, targetFps, m) < DropJitterMs(baseFps, targetFps, best) - 0.1)
+            best = m;
+    }
+
+    // Keep the current one unless the new one is clearly better or as good and cheaper,
+    // every change is a DLSSG options change
+    auto currentJitter = DropJitterMs(baseFps, targetFps, current);
+    auto bestJitter = DropJitterMs(baseFps, targetFps, best);
+    if (current >= 2 && current <= maxMultiplier && currentJitter <= bestJitter + 0.3 &&
+        !(best < current && bestJitter <= currentJitter + 0.1))
+    {
+        return current;
+    }
+
+    LOG_DEBUG("Dynamic FG multiplier {} -> {}, base fps: {:.1f}, target: {}, max: {}", current, best, baseFps,
+              targetFps, maxMultiplier);
+    return best;
+}
+
+// Max refresh for Drop mode, from config or the primary display
+double StreamlineHooks::DynamicMaxRefresh()
+{
+    if (auto configured = Config::Instance()->FGDynamicMaxRefresh.value_or_default(); configured > 0.0f)
+        return configured;
+
+    static double refresh = 0.0;
+    static double lastQueryMs = 0.0;
+    if (auto now = Util::MillisecondsNow(); now - lastQueryMs > 5000.0)
+    {
+        DEVMODEW mode {};
+        mode.dmSize = sizeof(mode);
+        if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+            refresh = mode.dmDisplayFrequency;
+
+        lastQueryMs = now;
+    }
+
+    return refresh;
+}
+
+// Called once per real frame, from slSetConstants and the present start marker, whichever the game uses
+void StreamlineHooks::dynamicFgPresent(uint32_t frame)
+{
+    static std::mutex dynamicMutex;
+    std::scoped_lock lock(dynamicMutex);
+
+    // Only newer frames, constants for the next frame can arrive before this frame's present marker
+    static uint32_t lastFrame = UINT32_MAX;
+    if (lastFrame != UINT32_MAX && (int32_t) (frame - lastFrame) <= 0 && lastFrame - frame < 1000)
+        return;
+
+    lastFrame = frame;
+
+    auto& state = State::Instance();
+    auto config = Config::Instance();
+    auto targetFps = config->FGDynamicTargetFps.value_or_default();
+
+    // Only for the game's own DLSSG going to Streamline, not when we replace it with another FG
+    bool ownDlssg = state.activeFgInput != FGInput::DLSSG && state.activeFgOutput == FGOutput::DLSSG;
+    bool replacedDlssg = state.activeFgInput == FGInput::DLSSG && state.activeFgOutput != FGOutput::DLSSG &&
+                         state.activeFgOutput != FGOutput::NoFG;
+    bool forcedDynamic = config->FGDLSSGOverrideForceDMFG.value_or_default() && state.dlssgGameDMFGSupported;
+
+    bool usable = targetFps > 0.0f && o_slDLSSGSetOptions != nullptr && !ownDlssg && !replacedDlssg &&
+                  !forcedDynamic && lastDlssgOptions.mode != sl::DLSSGMode::eOff;
+
+    // Real frame rate for the overlay, also when the controller is off
+    static double lastPresentMs = 0.0;
+    static double avgRealFrameMs = 0.0;
+    auto nowMs = Util::MillisecondsNow();
+    if (auto delta = nowMs - lastPresentMs; lastPresentMs > 0.0 && delta < 250.0)
+        avgRealFrameMs = avgRealFrameMs <= 0.0 ? delta : avgRealFrameMs + 0.1 * (delta - avgRealFrameMs);
+    lastPresentMs = nowMs;
+    if (avgRealFrameMs > 0.0)
+        DynamicFGStats::baseFps = (float) (1000.0 / avgRealFrameMs);
+
+    static double activeSinceMs = 0.0;
+
+    if (!usable)
+    {
+        if (DynamicFGStats::mode == DynamicFGStats::CountSwitching)
+            DynamicFGStats::mode = nullptr;
+
+        PresentDropper::SetTarget(0.0);
+        activeSinceMs = 0.0;
+
+        if (dynamicFgFrames.has_value())
+        {
+            dynamicFgFrames.reset();
+            dynamicFG.Reset();
+            updateDlssgOptions();
+        }
+
+        return;
+    }
+
+    // DynamicMode: 0 Drop (any multiplier above 1x), 1 Count switching (2x and up), 2 Hybrid (Count from 2x),
+    // 3 Auto (whichever is expected to be smoother)
+    auto mode = config->FGDynamicMode.value_or_default();
+    auto baseFps = avgRealFrameMs > 0.0 ? 1000.0 / avgRealFrameMs : 0.0;
+
+    // Drop and Auto can use more frames than the game asked for, up to what the GPU supports
+    auto maxGenerated =
+        state.dlssgMfgMax.value_or(0) > 0 ? (uint32_t) state.dlssgMfgMax.value() : dynamicFgMaxFrames;
+    auto maxMultiplier = maxGenerated + 1;
+    if (auto maxRefresh = DynamicMaxRefresh(); maxRefresh > 0.0 && baseFps > 0.0)
+        maxMultiplier = std::clamp((uint32_t) (maxRefresh / baseFps), 2u, maxMultiplier);
+
+    // Choose once a second, the first time after a second so the base fps has settled
+    static bool dropping = false;
+    static uint32_t multiplier = 0;
+    static double lastChoiceMs = 0.0;
+    if (lastChoiceMs <= 0.0)
+        lastChoiceMs = nowMs;
+
+    bool choose = baseFps > 0.0 && nowMs - lastChoiceMs > 1000.0;
+    if (choose)
+    {
+        multiplier = ChooseMultiplier(baseFps, targetFps, maxMultiplier, multiplier);
+        lastChoiceMs = nowMs;
+    }
+
+    if (mode == 0)
+    {
+        dropping = true;
+    }
+    else if (mode == 1 || baseFps <= 0.0)
+    {
+        dropping = false;
+    }
+    else if (mode == 2)
+    {
+        // Hysteresis around 2x so it doesn't flip between the two every frame
+        if (targetFps < baseFps * 1.95)
+            dropping = true;
+        else if (targetFps > baseFps * 2.05)
+            dropping = false;
+    }
+    else if (choose)
+    {
+        // Count alternates between the two multipliers around the target, only the average has to fit the cap
+        auto dropJitter = DropJitterMs(baseFps, targetFps, multiplier);
+        auto countJitter = CountJitterMs(baseFps, targetFps, CountMaxMultiplier(baseFps, targetFps, maxGenerated));
+        auto newDropping = dropping ? dropJitter <= countJitter + 0.1 : dropJitter < countJitter - 0.1;
+
+        if (newDropping != dropping)
+            LOG_DEBUG("Dynamic FG auto: {}, drop jitter {:.2f}ms (x{}), count jitter {:.2f}ms",
+                      newDropping ? "drop" : "count", dropJitter, multiplier, countJitter);
+
+        dropping = newDropping;
+    }
+
+    uint32_t frames = dynamicFgMaxFrames;
+
+    // The first second runs at the GPU max so DLSSG sets itself up for it, it can't be raised later
+    if (activeSinceMs <= 0.0)
+        activeSinceMs = nowMs;
+
+    if (nowMs - activeSinceMs < 1000.0)
+    {
+        frames = maxGenerated;
+        dynamicFgLimit = maxGenerated;
+        dynamicFG.Reset(nowMs);
+        PresentDropper::SetTarget(0.0);
+    }
+    else if (dropping)
+    {
+        frames = multiplier > 1 ? multiplier - 1 : maxMultiplier - 1;
+        dynamicFgLimit = maxGenerated;
+
+        dynamicFG.Reset(nowMs);
+        PresentDropper::SetTarget(targetFps);
+        PresentDropper::SetSlotMs(avgRealFrameMs / (frames + 1));
+        PresentDropper::SetRealFrameMs(avgRealFrameMs);
+    }
+    else
+    {
+        PresentDropper::SetTarget(0.0);
+        // Not limited to what the game asked for, only to the GPU max and the refresh cap
+        dynamicFgLimit = baseFps > 0.0 ? CountMaxMultiplier(baseFps, targetFps, maxGenerated) - 1 : maxGenerated;
+
+        // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
+        frames = dynamicFG.Decide(nowMs, targetFps, dynamicFgLimit, 1);
+        DynamicFGStats::mode = DynamicFGStats::CountSwitching;
+        DynamicFGStats::targetFps = targetFps;
+    }
+
+    LOG_DEBUG("Dynamic FG target: {}, base fps: {:.2f}, dropping: {}, frames: {} -> {}", targetFps, baseFps, dropping,
+              dynamicFgMaxFrames, frames);
+
+    DynamicFGStats::decision = frames;
+    DynamicFGStats::maxFrames = dynamicFgMaxFrames;
+
+    // Streamline keeps the options, only call it again when the decision changes
+    if (dynamicFgFrames != frames)
+    {
+        dynamicFgFrames = frames;
         hkslDLSSGSetOptions(lastDlssgViewport, lastDlssgOptions);
     }
 }
@@ -2063,6 +2339,10 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 if (o_slEvaluateFeature != nullptr)
                     DetourAttach(&(PVOID&) o_slEvaluateFeature, hkslEvaluateFeature);
 
+                // Always hooked, dynamic FG runs once per frame from it
+                if (o_slSetConstants != nullptr)
+                    DetourAttach(&(PVOID&) o_slSetConstants, hkslSetConstants);
+
                 if (State::Instance().activeFgInput == FGInput::NvngxFG ||
                     State::Instance().activeFgInput == FGInput::DLSSG)
                 {
@@ -2071,9 +2351,6 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 
                     if (o_slSetTagForFrame != nullptr)
                         DetourAttach(&(PVOID&) o_slSetTagForFrame, hkslSetTagForFrame);
-
-                    if (o_slSetConstants != nullptr)
-                        DetourAttach(&(PVOID&) o_slSetConstants, hkslSetConstants);
                 }
 
                 if (State::Instance().activeFgInput == FGInput::DLSSG)
