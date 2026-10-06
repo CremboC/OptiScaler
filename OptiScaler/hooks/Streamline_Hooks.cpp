@@ -1340,6 +1340,21 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
 
     state.dlssgLastSetMode = newOptions.mode;
 
+    // Dynamic FG, game asked for frame generation, generate 0..N frames for this real frame
+    if (dlssgPotentiallyActive && newOptions.mode == sl::DLSSGMode::eOn)
+    {
+        dynamicFgMaxFrames = (std::max) (newOptions.numFramesToGenerate, 1u);
+
+        if (dynamicFgFrames.has_value())
+        {
+            auto frames = (std::min) (dynamicFgFrames.value(), dynamicFgMaxFrames);
+
+            newOptions.flags |= sl::DLSSGFlags::eRetainResourcesWhenOff;
+            newOptions.mode = frames > 0 ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
+            newOptions.numFramesToGenerate = (std::max) (frames, 1u);
+        }
+    }
+
     return o_slDLSSGSetOptions(viewport, newOptions);
 }
 
@@ -1684,9 +1699,8 @@ void* StreamlineHooks::hkreflex_slGetPluginFunction(PFN_slGetPluginFunction orig
     }
 
     // TODO: Hopefully a game doesn't call both, maybe separate
-    if (strcmp(functionName, "slReflexSetMarker") == 0 &&
-        (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
-         State::Instance().activeFgInput == FGInput::DLSSG))
+    // Always hooked, dynamic FG needs the present marker
+    if (strcmp(functionName, "slReflexSetMarker") == 0)
     {
         o_slPCLSetMarker = (decltype(&slPCLSetMarker)) original(functionName);
         return &hkslPCLSetMarker;
@@ -1729,6 +1743,9 @@ sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::Fra
             return result;
         }
     }
+
+    if (marker == sl::PCLMarker::ePresentStart)
+        dynamicFgPresent();
 
     if (State::Instance().activeFgInput == FGInput::DLSSG)
     {
@@ -1785,9 +1802,8 @@ void* StreamlineHooks::hkpcl_slGetPluginFunction(PFN_slGetPluginFunction origina
 {
     // LOG_DEBUG("{}", functionName);
 
-    if (strcmp(functionName, "slPCLSetMarker") == 0 &&
-        (State::Instance().gameQuirks & GameQuirk::FixSlSimulationMarkers ||
-         State::Instance().activeFgInput == FGInput::DLSSG))
+    // Always hooked, dynamic FG needs the present marker
+    if (strcmp(functionName, "slPCLSetMarker") == 0)
     {
         o_slPCLSetMarker = (decltype(&slPCLSetMarker)) original(functionName);
         return &hkslPCLSetMarker;
@@ -1908,6 +1924,47 @@ void StreamlineHooks::updateDlssgOptions()
     if (o_slDLSSGSetOptions)
     {
         LOG_FUNC();
+        hkslDLSSGSetOptions(lastDlssgViewport, lastDlssgOptions);
+    }
+}
+
+// Called on the game's present start marker, once per real frame
+void StreamlineHooks::dynamicFgPresent()
+{
+    auto& state = State::Instance();
+    auto config = Config::Instance();
+    auto targetFps = config->FGDynamicTargetFps.value_or_default();
+
+    // Only for the game's own DLSSG going to Streamline, not when we replace it with another FG
+    bool ownDlssg = state.activeFgInput != FGInput::DLSSG && state.activeFgOutput == FGOutput::DLSSG;
+    bool replacedDlssg = state.activeFgInput == FGInput::DLSSG && state.activeFgOutput != FGOutput::DLSSG &&
+                         state.activeFgOutput != FGOutput::NoFG;
+    bool forcedDynamic = config->FGDLSSGOverrideForceDMFG.value_or_default() && state.dlssgGameDMFGSupported;
+
+    bool usable = targetFps > 0.0f && o_slDLSSGSetOptions != nullptr && !ownDlssg && !replacedDlssg &&
+                  !forcedDynamic && lastDlssgOptions.mode != sl::DLSSGMode::eOff;
+
+    if (!usable)
+    {
+        if (dynamicFgFrames.has_value())
+        {
+            dynamicFgFrames.reset();
+            dynamicFG.Reset();
+            updateDlssgOptions();
+        }
+
+        return;
+    }
+
+    auto frames = dynamicFG.Decide(Util::MillisecondsNow(), targetFps, dynamicFgMaxFrames);
+
+    LOG_DEBUG("Dynamic FG target: {}, avg frame time: {:.2f}ms, frames: {} -> {}", targetFps,
+              dynamicFG.AverageFrameTimeMs(), dynamicFgMaxFrames, frames);
+
+    // Streamline keeps the options, only call it again when the decision changes
+    if (dynamicFgFrames != frames)
+    {
+        dynamicFgFrames = frames;
         hkslDLSSGSetOptions(lastDlssgViewport, lastDlssgOptions);
     }
 }

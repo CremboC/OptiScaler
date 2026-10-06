@@ -11,6 +11,9 @@
 #include "include/sl.param/parameters.h"
 
 #include "Hook_Utils.h"
+#include <framegen/DynamicFG.h>
+
+#include <optional>
 
 struct Adapter
 {
@@ -140,6 +143,7 @@ class StreamlineHooks
 
     static void updateForceReflex();
     static void updateDlssgOptions();
+    static void dynamicFgPresent();
 
     static void unhookInterposer();
     static void hookInterposer(HMODULE slInterposer);
@@ -326,6 +330,11 @@ class StreamlineHooks
     inline static decltype(&slDLSSGGetState) o_slDLSSGGetState = nullptr;
     static inline sl::ViewportHandle lastDlssgViewport {}; // For updating options when we change them
     static inline sl::DLSSGOptions lastDlssgOptions {};
+
+    // Dynamic FG for the game's own DLSSG, decided once per real frame in dynamicFgPresent
+    static inline DynamicFGController dynamicFG {};
+    static inline std::optional<uint32_t> dynamicFgFrames = std::nullopt;
+    static inline uint32_t dynamicFgMaxFrames = 1;
 
     static bool hkdlssg_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON, const char** pluginJSON);
     static sl::Result hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,
