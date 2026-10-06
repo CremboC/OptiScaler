@@ -4352,6 +4352,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             }
         }
 
+        ImGui::BeginDisabled(config->FGDLSSGForceDMFG.value_or_default());
+        float dynamicTargetFps = config->FGDynamicTargetFps.value_or_default();
+        if (ImGui::SliderFloat("Dynamic FG Target FPS##DLSSG", &dynamicTargetFps, 0.0f, 360.0f, "%.0f"))
+            config->FGDynamicTargetFps = dynamicTargetFps;
+
+        ShowTooltip("Decides per real frame how many frames DLSSG generates (0 turns it off for that frame)\n"
+                    "so the output framerate averages to this target, e.g. 1.5x\n"
+                    "0 is off (always generate)");
+        ImGui::EndDisabled();
+
         bool useGamesMarkers = config->FGDLSSGUseGamesReflexMarkers.value_or_default();
         ImGui::BeginDisabled(!ReflexHooks::gameIsSendingMarkers());
         if (ImGui::Checkbox("Use Game's Reflex Markers", &useGamesMarkers))

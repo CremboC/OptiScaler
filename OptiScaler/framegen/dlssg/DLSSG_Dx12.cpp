@@ -289,6 +289,18 @@ bool DLSSG_Dx12::Dispatch()
         options.mode = sl::DLSSGMode::eDynamic;
         options.dynamicTargetFrameRate = Config::Instance()->FGDLSSGFramerateTargetDMFG.value_or_default();
     }
+    else if (auto targetFps = Config::Instance()->FGDynamicTargetFps.value_or_default(); targetFps > 0.0f)
+    {
+        // Decide per real frame how many frames DLSSG generates, 0 turns it off for this frame
+        auto frames = _dynamicFG.Decide(Util::MillisecondsNow(), targetFps, (uint32_t) _framesToInterpolate);
+
+        options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+        options.mode = frames > 0 ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
+        options.numFramesToGenerate = (std::max) (frames, 1u);
+
+        LOG_DEBUG("Dynamic FG target: {}, avg frame time: {:.2f}ms, frames: {} -> {}", targetFps,
+                  _dynamicFG.AverageFrameTimeMs(), _framesToInterpolate, frames);
+    }
 
     auto dlssgSetOptionsResult = StreamlineProxy::DLSSGSetOptions()(viewport, options);
 

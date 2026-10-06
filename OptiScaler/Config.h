@@ -554,6 +554,7 @@ class Config
     CustomOptional<bool> FGModifyBufferState { false };
     CustomOptional<bool> FGModifySCIndex { false };
     CustomOptional<float> FGHudCutoff { 0.0f };
+    CustomOptional<float> FGDynamicTargetFps { 0.0f }; // 0 is off, used by FSR FG and DLSSG outputs
     CustomOptional<FrameTimeSource> FTInput { FrameTimeSource::Input };
     CustomOptional<bool> FGReprojectionEnabled { false }; // WIP Not saved or loaded
 
@@ -604,7 +605,6 @@ class Config
     CustomOptional<bool> FGDebugResetLines { false };
     CustomOptional<bool> FGDebugTearLines { false };
     CustomOptional<bool> FGDebugPacingLines { false };
-    CustomOptional<float> FGDynamicTargetFps { 0.0f };
     CustomOptional<bool> FGAsync { false };
     CustomOptional<bool> FGFramePacingTuning { true };
     CustomOptional<float> FGFPTSafetyMarginInMs { 0.01f };

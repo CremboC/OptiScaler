@@ -126,6 +126,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGModifyBufferState.set_from_config(readBool("FrameGen", "ModifyBufferState"));
             FGModifySCIndex.set_from_config(readBool("FrameGen", "ModifySCIndex"));
             FGHudCutoff.set_from_config(readFloat("FrameGen", "HudCutoff"));
+            FGDynamicTargetFps.set_from_config(readFloat("FrameGen", "DynamicTargetFps"));
         }
 
         // FSR FG
@@ -133,7 +134,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDebugTearLines.set_from_config(readBool("FSRFG", "DebugTearLines"));
             FGDebugResetLines.set_from_config(readBool("FSRFG", "DebugResetLines"));
             FGDebugPacingLines.set_from_config(readBool("FSRFG", "DebugPacingLines"));
-            FGDynamicTargetFps.set_from_config(readFloat("FSRFG", "DynamicTargetFps"));
             FGAsync.set_from_config(readBool("FSRFG", "AllowAsync"));
             FGUseMutexForSwapchain.set_from_config(readBool("FSRFG", "UseMutexForSwapchain"));
             FGFramePacingTuning.set_from_config(readBool("FSRFG", "FramePacingTuning"));
@@ -925,6 +925,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGModifyBufferState.value_for_config()).c_str());
         ini.SetValue("FrameGen", "ModifySCIndex", GetBoolValue(Instance()->FGModifySCIndex.value_for_config()).c_str());
         ini.SetValue("FrameGen", "HudCutoff", GetFloatValue(Instance()->FGHudCutoff.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "DynamicTargetFps",
+                     GetFloatValue(Instance()->FGDynamicTargetFps.value_for_config()).c_str());
     }
 
     // FSR FG output
@@ -934,8 +936,6 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGDebugResetLines.value_for_config()).c_str());
         ini.SetValue("FSRFG", "DebugPacingLines",
                      GetBoolValue(Instance()->FGDebugPacingLines.value_for_config()).c_str());
-        ini.SetValue("FSRFG", "DynamicTargetFps",
-                     GetFloatValue(Instance()->FGDynamicTargetFps.value_for_config()).c_str());
         ini.SetValue("FSRFG", "AllowAsync", GetBoolValue(Instance()->FGAsync.value_for_config()).c_str());
         ini.SetValue("FSRFG", "UseMutexForSwapchain",
                      GetBoolValue(Instance()->FGUseMutexForSwapchain.value_for_config()).c_str());
