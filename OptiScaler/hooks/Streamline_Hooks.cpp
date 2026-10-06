@@ -1183,12 +1183,23 @@ bool StreamlineHooks::hklocal_dlssg_slOnPluginLoad(sl::param::IParameters* param
 sl::Result StreamlineHooks::hkslSetConstants(const sl::Constants& values, const sl::FrameToken& frame,
                                              const sl::ViewportHandle& viewport)
 {
-    std::scoped_lock lock(setConstantsMutex);
-    LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
+    sl::Result result;
 
-    State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
+    {
+        std::scoped_lock lock(setConstantsMutex);
+        LOG_TRACE("called with frameIndex: {}, viewport: {}", (unsigned int) frame, (unsigned int) viewport);
 
-    return o_slSetConstants(values, frame, viewport);
+        // Always hooked for dynamic FG, only feed our FG inputs when they are used
+        if (State::Instance().activeFgInput == FGInput::NvngxFG || State::Instance().activeFgInput == FGInput::DLSSG)
+            State::Instance().slFGInputs.setConstants(values, (uint32_t) frame);
+
+        result = o_slSetConstants(values, frame, viewport);
+    }
+
+    // DLSSG games set constants every frame, a reliable once per real frame point for dynamic FG
+    dynamicFgPresent((uint32_t) frame);
+
+    return result;
 }
 
 bool StreamlineHooks::hkcommon_slOnPluginLoad(sl::param::IParameters* params, const char* loaderJSON,
@@ -1740,7 +1751,7 @@ sl::Result StreamlineHooks::hkslPCLSetMarker(sl::PCLMarker marker, const sl::Fra
     }
 
     if (marker == sl::PCLMarker::ePresentStart)
-        dynamicFgPresent();
+        dynamicFgPresent((uint32_t) frame);
 
     if (State::Instance().activeFgInput == FGInput::DLSSG)
     {
@@ -2007,9 +2018,19 @@ double StreamlineHooks::DynamicMaxRefresh()
     return refresh;
 }
 
-// Called on the game's present start marker, once per real frame
-void StreamlineHooks::dynamicFgPresent()
+// Called once per real frame, from slSetConstants and the present start marker, whichever the game uses
+void StreamlineHooks::dynamicFgPresent(uint32_t frame)
 {
+    static std::mutex dynamicMutex;
+    std::scoped_lock lock(dynamicMutex);
+
+    // Only newer frames, constants for the next frame can arrive before this frame's present marker
+    static uint32_t lastFrame = UINT32_MAX;
+    if (lastFrame != UINT32_MAX && (int32_t) (frame - lastFrame) <= 0 && lastFrame - frame < 1000)
+        return;
+
+    lastFrame = frame;
+
     auto& state = State::Instance();
     auto config = Config::Instance();
     auto targetFps = config->FGDynamicTargetFps.value_or_default();
@@ -2295,6 +2316,10 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
                 if (o_slEvaluateFeature != nullptr)
                     DetourAttach(&(PVOID&) o_slEvaluateFeature, hkslEvaluateFeature);
 
+                // Always hooked, dynamic FG runs once per frame from it
+                if (o_slSetConstants != nullptr)
+                    DetourAttach(&(PVOID&) o_slSetConstants, hkslSetConstants);
+
                 if (State::Instance().activeFgInput == FGInput::NvngxFG ||
                     State::Instance().activeFgInput == FGInput::DLSSG)
                 {
@@ -2303,9 +2328,6 @@ void StreamlineHooks::hookInterposer(HMODULE slInterposer)
 
                     if (o_slSetTagForFrame != nullptr)
                         DetourAttach(&(PVOID&) o_slSetTagForFrame, hkslSetTagForFrame);
-
-                    if (o_slSetConstants != nullptr)
-                        DetourAttach(&(PVOID&) o_slSetConstants, hkslSetConstants);
                 }
 
                 if (State::Instance().activeFgInput == FGInput::DLSSG)

@@ -143,7 +143,7 @@ class StreamlineHooks
 
     static void updateForceReflex();
     static void updateDlssgOptions();
-    static void dynamicFgPresent();
+    static void dynamicFgPresent(uint32_t frame);
     static double DropJitterMs(double baseFps, double targetFps, uint32_t multiplier);
     static double CountJitterMs(double baseFps, double targetFps, uint32_t maxMultiplier);
     static uint32_t CountMaxMultiplier(double baseFps, double targetFps, uint32_t maxGenerated);
