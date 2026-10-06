@@ -1358,7 +1358,16 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
         dynamicFgMaxFrames = (std::max) (newOptions.numFramesToGenerate, 1u);
 
         if (dynamicFgFrames.has_value())
+        {
             newOptions.numFramesToGenerate = std::clamp(dynamicFgFrames.value(), 1u, dynamicFgLimit);
+        }
+        else if (Config::Instance()->FGDynamicTargetFps.value_or_default() > 0.0f &&
+                 state.dlssgMfgMax.value_or(0) > 0)
+        {
+            // DLSSG can't go above the count it started with once it is generating, lowering is fine,
+            // so dynamic FG starts it at the GPU max whatever the game asked for
+            newOptions.numFramesToGenerate = (uint32_t) state.dlssgMfgMax.value();
+        }
     }
 
     return o_slDLSSGSetOptions(viewport, newOptions);
@@ -2054,12 +2063,15 @@ void StreamlineHooks::dynamicFgPresent(uint32_t frame)
     if (avgRealFrameMs > 0.0)
         DynamicFGStats::baseFps = (float) (1000.0 / avgRealFrameMs);
 
+    static double activeSinceMs = 0.0;
+
     if (!usable)
     {
         if (DynamicFGStats::mode == DynamicFGStats::CountSwitching)
             DynamicFGStats::mode = nullptr;
 
         PresentDropper::SetTarget(0.0);
+        activeSinceMs = 0.0;
 
         if (dynamicFgFrames.has_value())
         {
@@ -2129,7 +2141,18 @@ void StreamlineHooks::dynamicFgPresent(uint32_t frame)
 
     uint32_t frames = dynamicFgMaxFrames;
 
-    if (dropping)
+    // The first second runs at the GPU max so DLSSG sets itself up for it, it can't be raised later
+    if (activeSinceMs <= 0.0)
+        activeSinceMs = nowMs;
+
+    if (nowMs - activeSinceMs < 1000.0)
+    {
+        frames = maxGenerated;
+        dynamicFgLimit = maxGenerated;
+        dynamicFG.Reset(nowMs);
+        PresentDropper::SetTarget(0.0);
+    }
+    else if (dropping)
     {
         frames = multiplier > 1 ? multiplier - 1 : maxMultiplier - 1;
         dynamicFgLimit = maxGenerated;
@@ -2142,8 +2165,8 @@ void StreamlineHooks::dynamicFgPresent(uint32_t frame)
     else
     {
         PresentDropper::SetTarget(0.0);
-        dynamicFgLimit =
-            mode == 3 && baseFps > 0.0 ? CountMaxMultiplier(baseFps, targetFps, maxGenerated) - 1 : dynamicFgMaxFrames;
+        // Not limited to what the game asked for, only to the GPU max and the refresh cap
+        dynamicFgLimit = baseFps > 0.0 ? CountMaxMultiplier(baseFps, targetFps, maxGenerated) - 1 : maxGenerated;
 
         // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
         frames = dynamicFG.Decide(nowMs, targetFps, dynamicFgLimit, 1);
