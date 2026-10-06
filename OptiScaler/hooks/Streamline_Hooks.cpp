@@ -1923,9 +1923,9 @@ void StreamlineHooks::updateDlssgOptions()
     }
 }
 
-// Expected on-screen jitter of Drop mode at a multiplier. Shown frames can only come from the generated
+// Expected on-screen jitter (SD) of Drop mode at a multiplier. Shown frames can only come from the generated
 // grid (base fps x multiplier), when the target divides it evenly the cadence is perfect, otherwise frames are
-// off by up to half a slot. Factor from measurements on an RTX 5090
+// off by up to half a slot, about a third of a slot on average. Fitted to measurements on an RTX 5090
 double StreamlineHooks::DropJitterMs(double baseFps, double targetFps, uint32_t multiplier)
 {
     auto ratio = baseFps * multiplier / targetFps; // generated frames per shown frame
@@ -1933,7 +1933,7 @@ double StreamlineHooks::DropJitterMs(double baseFps, double targetFps, uint32_t 
         return 1000.0 - multiplier; // Can't reach the target, the more the better
 
     auto distance = std::abs(ratio - (std::max) (1.0, std::round(ratio)));
-    return 2.0 * (1000.0 / (baseFps * multiplier)) * distance;
+    return 2.0 * (1000.0 / (baseFps * multiplier)) * (std::min) (distance, 0.29);
 }
 
 // Expected on-screen jitter of Count mode, it alternates between the two multipliers around the target
@@ -1945,7 +1945,20 @@ double StreamlineHooks::CountJitterMs(double baseFps, double targetFps, uint32_t
 
     auto lower = (std::max) (2.0, std::floor(ratio));
     auto frac = ratio - std::floor(ratio);
-    return 0.5 * (1000.0 / baseFps) * (1.0 / lower - 1.0 / (lower + 1.0)) * (std::min) (frac, 1.0 - frac);
+    return (1000.0 / baseFps) * (1.0 / lower - 1.0 / (lower + 1.0)) * (std::min) (frac, 1.0 - frac);
+}
+
+// Highest multiplier Count may use, it alternates around the target so only the average output has to fit the cap
+uint32_t StreamlineHooks::CountMaxMultiplier(double baseFps, double targetFps, uint32_t maxGenerated)
+{
+    auto maxRefresh = DynamicMaxRefresh();
+    auto needed = (uint32_t) std::ceil(targetFps / baseFps - 0.03);
+    auto limit = maxGenerated + 1;
+
+    if (maxRefresh > 0.0 && targetFps > maxRefresh)
+        limit = (std::min) (limit, (std::max) (2u, (uint32_t) (maxRefresh / baseFps)));
+
+    return std::clamp(needed, 2u, limit);
 }
 
 // Frame generation multiplier for Drop mode, the smallest expected jitter, the cheaper multiplier on a tie
@@ -2081,8 +2094,9 @@ void StreamlineHooks::dynamicFgPresent()
     }
     else if (choose)
     {
+        // Count alternates between the two multipliers around the target, only the average has to fit the cap
         auto dropJitter = DropJitterMs(baseFps, targetFps, multiplier);
-        auto countJitter = CountJitterMs(baseFps, targetFps, maxMultiplier);
+        auto countJitter = CountJitterMs(baseFps, targetFps, CountMaxMultiplier(baseFps, targetFps, maxGenerated));
         auto newDropping = dropping ? dropJitter <= countJitter + 0.1 : dropJitter < countJitter - 0.1;
 
         if (newDropping != dropping)
@@ -2107,7 +2121,8 @@ void StreamlineHooks::dynamicFgPresent()
     else
     {
         PresentDropper::SetTarget(0.0);
-        dynamicFgLimit = mode == 3 ? maxMultiplier - 1 : dynamicFgMaxFrames;
+        dynamicFgLimit =
+            mode == 3 && baseFps > 0.0 ? CountMaxMultiplier(baseFps, targetFps, maxGenerated) - 1 : dynamicFgMaxFrames;
 
         // Never 0, switching DLSSG off per frame stops it generating at all, so targets below 2x end up at 2x
         frames = dynamicFG.Decide(nowMs, targetFps, dynamicFgLimit, 1);
